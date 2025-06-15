@@ -1,6 +1,7 @@
 import os
 from flask import Flask, jsonify, render_template, request
 import sqlite3
+from datetime import date, datetime
 
 app = Flask(__name__)
 
@@ -98,6 +99,14 @@ def create_transaction():
     amount = data.get('amount', 0)
     paid_with = data.get('paid_with', {})
     change_received = data.get('change_received', {})
+    timestamp_str = data.get('timestamp') # Expected format: YYYY-MM-DD HH:MM:SS
+
+    if timestamp_str:
+        try:
+            # Validate the timestamp format
+            datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            return jsonify({'error': 'Invalid timestamp format. Expected YYYY-MM-DD HH:MM:SS.'}), 400
 
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -122,10 +131,17 @@ def create_transaction():
                 )
 
         # 3. Log the transaction
-        cursor.execute(
-            'INSERT INTO transactions (note, amount) VALUES (?, ?)',
-            (note, amount)
-        )
+        if timestamp_str:
+            cursor.execute(
+                'INSERT INTO transactions (note, amount, timestamp) VALUES (?, ?, ?)',
+                (note, amount, timestamp_str)
+            )
+        else:
+            # Let SQLite use the default CURRENT_TIMESTAMP
+            cursor.execute(
+                'INSERT INTO transactions (note, amount) VALUES (?, ?)',
+                (note, amount)
+            )
         transaction_id = cursor.lastrowid
 
         # 4. Log the banknote movements for this transaction
@@ -176,13 +192,76 @@ def adjust_wallet():
 
 @app.route('/api/history', methods=['GET'])
 def get_history():
-    """Retrieves the last 20 transactions."""
+    """Retrieves transactions with optional filtering and sorting."""
+    filter_period = request.args.get('filter_period', 'all')
+    sort_by = request.args.get('sort_by', 'date_desc')
+
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT id, note, amount, timestamp FROM transactions ORDER BY timestamp DESC LIMIT 20')
+
+    query = 'SELECT id, note, amount, timestamp FROM transactions'
+    params = []
+
+    # Filtering
+    if filter_period == 'today':
+        query += ' WHERE DATE(timestamp) = DATE(?)'
+        params.append(date.today().isoformat())
+    elif filter_period == 'this_month':
+        query += ' WHERE STRFTIME("%Y-%m", timestamp) = STRFTIME("%Y-%m", ?)'
+        params.append(date.today().isoformat())
+    
+    # Sorting
+    if sort_by == 'date_asc':
+        query += ' ORDER BY timestamp ASC'
+    elif sort_by == 'amount_desc':
+        query += ' ORDER BY amount DESC, timestamp DESC'
+    elif sort_by == 'amount_asc':
+        query += ' ORDER BY amount ASC, timestamp DESC'
+    else: # Default 'date_desc'
+        query += ' ORDER BY timestamp DESC'
+
+    # Removed LIMIT 20 to show all filtered/sorted results
+    # If pagination is desired later, it can be added here.
+
+    cursor.execute(query, params)
     history = [dict(row) for row in cursor.fetchall()]
     conn.close()
     return jsonify(history)
+
+@app.route('/api/transaction/<int:transaction_id>/datetime', methods=['PUT'])
+def update_transaction_datetime(transaction_id):
+    """Updates the timestamp of a specific transaction."""
+    data = request.json
+    new_timestamp_str = data.get('timestamp')
+
+    if not new_timestamp_str:
+        return jsonify({'error': 'New timestamp is required.'}), 400
+
+    try:
+        # Validate and parse the timestamp (expected format: YYYY-MM-DD HH:MM:SS)
+        datetime.strptime(new_timestamp_str, '%Y-%m-%d %H:%M:%S')
+    except ValueError:
+        return jsonify({'error': 'Invalid timestamp format. Expected YYYY-MM-DD HH:MM:SS.'}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            'UPDATE transactions SET timestamp = ? WHERE id = ?',
+            (new_timestamp_str, transaction_id)
+        )
+        if cursor.rowcount == 0:
+            conn.rollback()
+            return jsonify({'error': 'Transaction not found or timestamp not updated.'}), 404
+        conn.commit()
+    except sqlite3.Error as e:
+        conn.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+    return jsonify({'message': 'Transaction timestamp updated successfully.'}), 200
+
 
 @app.route('/api/transaction/<int:transaction_id>', methods=['DELETE'])
 def delete_transaction(transaction_id):

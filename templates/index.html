@@ -41,9 +41,26 @@
 
         <div class="d-flex justify-content-between align-items-center mb-3">
             <h4 class="fw-light">Transaction History</h4>
-            <button class="btn btn-outline-secondary btn-sm" data-bs-toggle="modal" data-bs-target="#adjustModal" onclick="loadAdjustmentForm()">
-                <i class="bi bi-sliders me-1"></i> Adjust Wallet
-            </button>
+            <div class="d-flex align-items-center">
+                <div class="me-2">
+                    <select id="filter-period" class="form-select form-select-sm" aria-label="Filter by period">
+                        <option value="all" selected>All Time</option>
+                        <option value="today">Today</option>
+                        <option value="this_month">This Month</option>
+                    </select>
+                </div>
+                <div class="me-2">
+                    <select id="sort-by" class="form-select form-select-sm" aria-label="Sort by">
+                        <option value="date_desc" selected>Date (Newest First)</option>
+                        <option value="date_asc">Date (Oldest First)</option>
+                        <option value="amount_desc">Amount (Highest First)</option>
+                        <option value="amount_asc">Amount (Lowest First)</option>
+                    </select>
+                </div>
+                <button class="btn btn-outline-secondary btn-sm" data-bs-toggle="modal" data-bs-target="#adjustModal" onclick="loadAdjustmentForm()">
+                    <i class="bi bi-sliders me-1"></i> Adjust Wallet
+                </button>
+            </div>
         </div>
         <div id="history-container" class="history-card p-2">
             <ul id="history-list" class="list-group list-group-flush"></ul>
@@ -62,6 +79,10 @@
                         <div class="mb-3">
                             <label for="txn-note" class="form-label">Note</label>
                             <input type="text" class="form-control" id="txn-note" placeholder="e.g., Lunch at warung">
+                        </div>
+                        <div class="mb-3">
+                            <label for="txn-datetime" class="form-label">Date and Time</label>
+                            <input type="datetime-local" class="form-control" id="txn-datetime">
                         </div>
                         <hr>
                         <h6><i class="bi bi-box-arrow-up me-2"></i>Paid With</h6>
@@ -108,6 +129,29 @@
 
     <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <!-- Edit Date/Time Modal -->
+    <div class="modal fade" id="editDateTimeModal" tabindex="-1" aria-labelledby="editDateTimeModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="editDateTimeModalLabel">Edit Transaction Date/Time</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <input type="hidden" id="edit-transaction-id">
+                    <div class="mb-3">
+                        <label for="edit-transaction-datetime" class="form-label">New Date and Time</label>
+                        <input type="datetime-local" class="form-control" id="edit-transaction-datetime">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" onclick="submitDateTimeChange()">Save Changes</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script>
         // --- Global State ---
         let walletState = { banknotes: [] };
@@ -196,6 +240,19 @@
             $('#transaction-cost').text(formatRupiah(transactionCost));
         }
 
+        // --- Modal Event Listeners ---
+        $('#transactionModal').on('show.bs.modal', function () {
+            // Set current date and time for new transaction
+            const now = new Date();
+            now.setMinutes(now.getMinutes() - now.getTimezoneOffset()); // Adjust for local timezone
+            const formattedNow = now.toISOString().slice(0,16);
+            $('#txn-datetime').val(formattedNow);
+            // Reset other form fields if necessary
+            $('#txn-note').val('');
+            // Consider resetting paid-with and change-received inputs if they persist
+            $('#paid-with-container input, #change-received-container input').val(0).trigger('input'); 
+        });
+
         // --- API Calls ---
         async function fetchWalletStatus() {
             try {
@@ -225,24 +282,25 @@
             const paid_with = getFormData('paid');
             const change_received = getFormData('change');
 
-            const calculateTotal = (formData) => {
-                return Object.entries(formData).reduce((sum, [value, count]) => sum + parseInt(value) * count, 0);
-            };
+            const note = $('#txn-note').val() || 'Transaction';
+            const transactionDateTime = $('#txn-datetime').val(); // YYYY-MM-DDTHH:MM
+            const timestamp = transactionDateTime ? transactionDateTime.replace('T', ' ') + ':00' : null; // YYYY-MM-DD HH:MM:SS
 
-            const totalPaid = calculateTotal(paid_with);
-            const totalChange = calculateTotal(change_received);
-            const transactionAmount = totalPaid - totalChange;
+            const totalPaid = walletState.banknotes.reduce((sum, bn) => sum + (parseInt($(`#paid-${bn.value}`).val()) || 0) * bn.value, 0);
+            const totalChange = walletState.banknotes.reduce((sum, bn) => sum + (parseInt($(`#change-${bn.value}`).val()) || 0) * bn.value, 0);
+            const amount = totalPaid - totalChange;
 
-            if (transactionAmount <= 0) {
+            if (amount <= 0) {
                 alert('Transaction amount must be positive. Please check your paid and change amounts.');
                 return;
             }
 
             const payload = {
-                note: $('#txn-note').val(),
-                amount: transactionAmount,
+                note: note,
+                amount: amount,
                 paid_with: paid_with,
-                change_received: change_received
+                change_received: change_received,
+                timestamp: timestamp // Add timestamp to payload
             };
 
             try {
@@ -289,9 +347,9 @@
             }
         }
 
-        async function fetchHistory() {
+        async function fetchHistory(filterPeriod = 'all', sortBy = 'date_desc') {
             try {
-                const response = await fetch('/api/history');
+                const response = await fetch(`/api/history?filter_period=${filterPeriod}&sort_by=${sortBy}`);
                 const history = await response.json();
                 const historyList = $('#history-list');
                 historyList.empty();
@@ -313,6 +371,7 @@
                             </div>
                             <div class="d-flex align-items-center">
                                 <span class="fw-bold text-danger me-3">-${formatRupiah(tx.amount)}</span>
+                                <button class="btn btn-outline-secondary btn-sm me-2" onclick="openEditDateTimeModal(${tx.id}, '${tx.timestamp}')"><i class="bi bi-pencil-square"></i></button>
                                 <button class="btn btn-outline-danger btn-sm" onclick="deleteTransaction(${tx.id})"><i class="bi bi-trash"></i></button>
                             </div>
                         </li>
@@ -339,6 +398,48 @@
             });
         }
         
+        function openEditDateTimeModal(transactionId, currentTimestamp) {
+            // Timestamps from SQLite are usually 'YYYY-MM-DD HH:MM:SS'
+            // datetime-local input needs 'YYYY-MM-DDTHH:MM'
+            const formattedTimestamp = currentTimestamp.replace(' ', 'T').substring(0, 16);
+            $('#edit-transaction-id').val(transactionId);
+            $('#edit-transaction-datetime').val(formattedTimestamp);
+            $('#editDateTimeModal').modal('show');
+        }
+
+        async function submitDateTimeChange() {
+            const transactionId = $('#edit-transaction-id').val();
+            const newDateTimeValue = $('#edit-transaction-datetime').val(); // Format: YYYY-MM-DDTHH:MM
+
+            if (!newDateTimeValue) {
+                alert('Please select a new date and time.');
+                return;
+            }
+
+            // Convert to 'YYYY-MM-DD HH:MM:SS' for backend/SQLite
+            const newTimestamp = newDateTimeValue.replace('T', ' ') + ':00';
+
+            try {
+                const response = await fetch(`/api/transaction/${transactionId}/datetime`, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ timestamp: newTimestamp })
+                });
+                const result = await response.json();
+                if (response.ok) {
+                    $('#editDateTimeModal').modal('hide');
+                    fetchHistory($('#filter-period').val(), $('#sort-by').val()); // Refresh history with current filters
+                } else {
+                    alert('Failed to update date/time: ' + (result.error || 'Unknown error'));
+                }
+            } catch (error) {
+                console.error('Error updating date/time:', error);
+                alert('Could not update date/time.');
+            }
+        }
+
         async function submitAdjustment() {
             const adjustments = {};
             walletState.banknotes.forEach(note => {
@@ -365,10 +466,20 @@
         }
 
 
+        // --- Event Listeners for Filters/Sorting ---
+        $('#filter-period, #sort-by').on('change', function() {
+            const filterPeriod = $('#filter-period').val();
+            const sortBy = $('#sort-by').val();
+            fetchHistory(filterPeriod, sortBy);
+        });
+
         // --- Initial Load ---
         $(document).ready(function() {
             fetchWalletStatus();
-            fetchHistory();
+            // Initial load of history with default filter/sort
+            const initialFilterPeriod = $('#filter-period').val();
+            const initialSortBy = $('#sort-by').val();
+            fetchHistory(initialFilterPeriod, initialSortBy);
         });
     </script>
 </body>
