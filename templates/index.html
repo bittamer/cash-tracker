@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cash Wallet Tracker</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <style>
+        body { 
+            background-color: #121212; 
+            color: #e0e0e0; 
+            font-family: 'Inter', sans-serif;
+        }
+        .card { background-color: #1e1e1e; border: 1px solid #333; }
+        .list-group-item { background-color: #1e1e1e; border-color: #333; }
+        .modal-content { background-color: #1e1e1e; }
+        .btn-primary { background-color: #bb86fc; border-color: #bb86fc; color: #000; }
+        .btn-secondary { background-color: #03dac6; border-color: #03dac6; color: #000; }
+        .btn-number { width: 45px; height: 45px; }
+        .note-value { font-weight: 500; font-size: 1.1rem; }
+        .history-card { background-color: #1e1e1e; border-radius: 0.5rem; }
+    </style>
+</head>
+<body>
+    <div class="container mt-4">
+        <div class="text-center mb-4">
+            <h1 class="display-4">My Cash Wallet</h1>
+            <h2 id="total-cash" class="fw-light">Rp 0</h2>
+        </div>
+
+        <div id="banknote-list" class="list-group mb-4">
+            </div>
+
+        <div class="d-grid gap-2 mb-4">
+            <button class="btn btn-primary btn-lg" data-bs-toggle="modal" data-bs-target="#transactionModal"><i class="bi bi-plus-circle-fill me-2"></i>New Transaction</button>
+        </div>
+
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h4 class="fw-light">Transaction History</h4>
+            <button class="btn btn-outline-secondary btn-sm" data-bs-toggle="modal" data-bs-target="#adjustModal" onclick="loadAdjustmentForm()">
+                <i class="bi bi-sliders me-1"></i> Adjust Wallet
+            </button>
+        </div>
+        <div id="history-container" class="history-card p-2">
+            <ul id="history-list" class="list-group list-group-flush"></ul>
+        </div>
+    </div>
+
+    <div class="modal fade" id="transactionModal" tabindex="-1">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">New Transaction</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="transaction-form">
+                        <div class="mb-3">
+                            <label for="txn-note" class="form-label">Note</label>
+                            <input type="text" class="form-control" id="txn-note" placeholder="e.g., Lunch at warung">
+                        </div>
+                        <hr>
+                        <h6><i class="bi bi-box-arrow-up me-2"></i>Paid With</h6>
+                        <div id="paid-with-container"></div>
+                        <p class="text-end mt-2">Total Paid: <strong id="total-paid">Rp 0</strong></p>
+                        <hr>
+                        <h6><i class="bi bi-box-arrow-down me-2"></i>Change Received</h6>
+                        <div id="change-received-container"></div>
+                        <p class="text-end mt-2">Total Change: <strong id="total-change">Rp 0</strong></p>
+                        <hr>
+                        <div class="text-center bg-dark p-3 rounded">
+                            <h6 class="text-muted">TRANSACTION COST</h6>
+                            <h3 class="display-6" id="transaction-cost">Rp 0</h3>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" onclick="submitTransaction()">Submit</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="adjustModal" tabindex="-1">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Adjust Wallet Balance</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="text-muted small">Set the exact count for each banknote denomination.</p>
+                    <div id="adjust-form-container"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" onclick="submitAdjustment()">Save Adjustments</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // --- Global State ---
+        let walletState = { banknotes: [] };
+
+        // --- Utility Functions ---
+        const formatRupiah = (number) => new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', minimumFractionDigits: 0 }).format(number);
+
+        // --- Core UI Functions ---
+        function updateUI(data) {
+            walletState = data;
+            $('#total-cash').text(formatRupiah(data.total_cash));
+            
+            const banknoteList = $('#banknote-list');
+            banknoteList.empty();
+            data.banknotes.forEach(note => {
+                banknoteList.append(`
+                    <div class="list-group-item d-flex justify-content-between align-items-center">
+                        <span class="note-value">${note.name}</span>
+                        <span class="badge bg-primary rounded-pill fs-6">${note.count}</span>
+                    </div>
+                `);
+            });
+            updateTransactionForms(data.banknotes);
+        }
+
+        function createNoteInput(containerId, note) {
+            const walletCountHTML = containerId === 'paid' 
+                ? `<small class="text-muted ms-2">(Wallet: ${note.count})</small>` 
+                : '';
+
+            return `
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <label class="form-label mb-0">${note.name}${walletCountHTML}</label>
+                    <div>
+                        <button type="button" class="btn btn-outline-secondary btn-number" onclick="changeCount('${containerId}', ${note.value}, -1)">-</button>
+                        <input type="number" class="form-control d-inline-block text-center" style="width: 60px;" id="${containerId}-${note.value}" value="0" min="0">
+                        <button type="button" class="btn btn-outline-secondary btn-number" onclick="changeCount('${containerId}', ${note.value}, 1)">+</button>
+                    </div>
+                </div>`;
+        }
+        
+        function updateTransactionForms(banknotes) {
+            const paidContainer = $('#paid-with-container');
+            const changeContainer = $('#change-received-container');
+            paidContainer.empty();
+            changeContainer.empty();
+            banknotes.forEach(note => {
+                paidContainer.append(createNoteInput('paid', note));
+                changeContainer.append(createNoteInput('change', note));
+            });
+            // Add listener to calculate totals
+            $('#paid-with-container input, #change-received-container input').on('input', calculateTransactionTotals);
+        }
+
+        function changeCount(containerId, noteValue, delta) {
+            const input = $(`#${containerId}-${noteValue}`);
+            let currentValue = parseInt(input.val()) || 0;
+            let newValue = Math.max(0, currentValue + delta);
+
+            if (containerId === 'paid') {
+                const noteInWallet = walletState.banknotes.find(n => n.value === noteValue);
+                if (noteInWallet && newValue > noteInWallet.count) {
+                    newValue = noteInWallet.count; // Cap at available amount
+                }
+            }
+            
+            input.val(newValue).trigger('input');
+        }
+        
+        function calculateTransactionTotals() {
+            let totalPaid = 0;
+            walletState.banknotes.forEach(note => {
+                const count = parseInt($(`#paid-${note.value}`).val()) || 0;
+                totalPaid += count * note.value;
+            });
+            $('#total-paid').text(formatRupiah(totalPaid));
+
+            let totalChange = 0;
+            walletState.banknotes.forEach(note => {
+                const count = parseInt($(`#change-${note.value}`).val()) || 0;
+                totalChange += count * note.value;
+            });
+            $('#total-change').text(formatRupiah(totalChange));
+
+            const transactionCost = totalPaid - totalChange;
+            $('#transaction-cost').text(formatRupiah(transactionCost));
+        }
+
+        // --- API Calls ---
+        async function fetchWalletStatus() {
+            try {
+                const response = await fetch('/api/wallet');
+                const data = await response.json();
+                if (response.ok) {
+                    updateUI(data);
+                } else {
+                    alert('Error fetching wallet status: ' + data.error);
+                }
+            } catch (error) {
+                console.error('Fetch error:', error);
+                alert('Could not connect to the server.');
+            }
+        }
+
+        async function submitTransaction() {
+            const getFormData = (prefix) => {
+                const formData = {};
+                walletState.banknotes.forEach(note => {
+                    const count = parseInt($(`#${prefix}-${note.value}`).val()) || 0;
+                    if (count > 0) formData[note.value] = count;
+                });
+                return formData;
+            };
+
+            const paid_with = getFormData('paid');
+            const change_received = getFormData('change');
+
+            const calculateTotal = (formData) => {
+                return Object.entries(formData).reduce((sum, [value, count]) => sum + parseInt(value) * count, 0);
+            };
+
+            const totalPaid = calculateTotal(paid_with);
+            const totalChange = calculateTotal(change_received);
+            const transactionAmount = totalPaid - totalChange;
+
+            if (transactionAmount <= 0) {
+                alert('Transaction amount must be positive. Please check your paid and change amounts.');
+                return;
+            }
+
+            const payload = {
+                note: $('#txn-note').val(),
+                amount: transactionAmount,
+                paid_with: paid_with,
+                change_received: change_received
+            };
+
+            try {
+                const response = await fetch('/api/transaction', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const result = await response.json();
+                if (response.ok) {
+                    $('#transactionModal').modal('hide');
+                    $('#transaction-form')[0].reset();
+                    calculateTransactionTotals(); // Resets all total displays
+                    fetchWalletStatus();
+                    fetchHistory();
+                } else {
+                    alert('Transaction failed: ' + result.error);
+                }
+            } catch (error) {
+                console.error('Submit error:', error);
+                alert('Could not submit transaction.');
+            }
+        }
+        
+        async function deleteTransaction(transactionId) {
+            if (!confirm('Are you sure you want to delete this transaction? This action will revert the banknote counts and cannot be undone.')) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/transaction/${transactionId}`, {
+                    method: 'DELETE'
+                });
+                const result = await response.json();
+                if (response.ok) {
+                    fetchWalletStatus();
+                    fetchHistory();
+                } else {
+                    alert('Deletion failed: ' + result.error);
+                }
+            } catch (error) {
+                console.error('Delete error:', error);
+                alert('Could not delete transaction.');
+            }
+        }
+
+        async function fetchHistory() {
+            try {
+                const response = await fetch('/api/history');
+                const history = await response.json();
+                const historyList = $('#history-list');
+                historyList.empty();
+                if (history.length === 0) {
+                    historyList.append('<li class="list-group-item text-center text-muted">No transaction history.</li>');
+                    return;
+                }
+                history.forEach(tx => {
+                    const formattedDate = new Date(tx.timestamp).toLocaleString('id-ID', { dateStyle: 'short', timeStyle: 'short' });
+                    const amountColor = tx.amount > 0 ? 'text-danger' : 'text-success';
+                    const sign = tx.amount > 0 ? '-' : '+';
+                    // For now, all transactions are expenses, so they are red.
+                    // This can be adapted if income transactions are added.
+                    historyList.append(`
+                        <li class="list-group-item d-flex justify-content-between align-items-center">
+                            <div>
+                                <strong>${tx.note || 'Transaction'}</strong>
+                                <small class="d-block text-muted">${formattedDate}</small>
+                            </div>
+                            <div class="d-flex align-items-center">
+                                <span class="fw-bold text-danger me-3">-${formatRupiah(tx.amount)}</span>
+                                <button class="btn btn-outline-danger btn-sm" onclick="deleteTransaction(${tx.id})"><i class="bi bi-trash"></i></button>
+                            </div>
+                        </li>
+                    `);
+                });
+            } catch (error) {
+                console.error('Fetch history error:', error);
+                const historyList = $('#history-list');
+                historyList.empty();
+                historyList.append('<li class="list-group-item text-center text-danger">Could not load history.</li>');
+            }
+        }
+        
+        function loadAdjustmentForm() {
+            const container = $('#adjust-form-container');
+            container.empty();
+            walletState.banknotes.forEach(note => {
+                container.append(`
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <label class="form-label mb-0">${note.name}</label>
+                        <input type="number" class="form-control text-center" style="width: 80px;" id="adjust-${note.value}" value="${note.count}" min="0">
+                    </div>
+                `);
+            });
+        }
+        
+        async function submitAdjustment() {
+            const adjustments = {};
+            walletState.banknotes.forEach(note => {
+                adjustments[note.value] = parseInt($(`#adjust-${note.value}`).val()) || 0;
+            });
+            
+            try {
+                const response = await fetch('/api/wallet/adjust', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ adjustments })
+                });
+                const result = await response.json();
+                if (response.ok) {
+                    $('#adjustModal').modal('hide');
+                    fetchWalletStatus();
+                } else {
+                    alert('Adjustment failed: ' + result.error);
+                }
+            } catch (error) {
+                console.error('Adjustment error:', error);
+                alert('Could not save adjustments.');
+            }
+        }
+
+
+        // --- Initial Load ---
+        $(document).ready(function() {
+            fetchWalletStatus();
+            fetchHistory();
+        });
+    </script>
+</body>
+</html>
