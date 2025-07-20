@@ -77,6 +77,14 @@
                 <div class="modal-body">
                     <form id="transaction-form">
                         <div class="mb-3">
+                            <div class="btn-group w-100" role="group">
+                                <input type="radio" class="btn-check" name="transaction-type" id="txn-type-expense" autocomplete="off" value="expense" checked>
+                                <label class="btn btn-outline-primary" for="txn-type-expense"><i class="bi bi-arrow-down-circle me-2"></i>Expense</label>
+                                <input type="radio" class="btn-check" name="transaction-type" id="txn-type-income" autocomplete="off" value="income">
+                                <label class="btn btn-outline-primary" for="txn-type-income"><i class="bi bi-arrow-up-circle me-2"></i>Income</label>
+                            </div>
+                        </div>
+                        <div class="mb-3">
                             <label for="txn-note" class="form-label">Note</label>
                             <input type="text" class="form-control" id="txn-note" placeholder="e.g., Lunch at warung">
                         </div>
@@ -85,16 +93,18 @@
                             <input type="datetime-local" class="form-control" id="txn-datetime">
                         </div>
                         <hr>
-                        <h6><i class="bi bi-box-arrow-up me-2"></i>Paid With</h6>
-                        <div id="paid-with-container"></div>
-                        <p class="text-end mt-2">Total Paid: <strong id="total-paid">Rp 0</strong></p>
+                        <div id="expense-fields">
+                            <h6><i class="bi bi-box-arrow-up me-2"></i>Paid With</h6>
+                            <div id="paid-with-container"></div>
+                            <p class="text-end mt-2">Total Paid: <strong id="total-paid">Rp 0</strong></p>
+                        </div>
                         <hr>
-                        <h6><i class="bi bi-box-arrow-down me-2"></i>Change Received</h6>
+                        <h6 id="change-received-label"><i class="bi bi-box-arrow-down me-2"></i>Change Received</h6>
                         <div id="change-received-container"></div>
-                        <p class="text-end mt-2">Total Change: <strong id="total-change">Rp 0</strong></p>
+                        <p class="text-end mt-2">Total: <strong id="total-change">Rp 0</strong></p>
                         <hr>
                         <div class="text-center bg-dark p-3 rounded">
-                            <h6 class="text-muted">TRANSACTION COST</h6>
+                            <h6 class="text-muted" id="transaction-total-label">TRANSACTION COST</h6>
                             <h3 class="display-6" id="transaction-cost">Rp 0</h3>
                         </div>
                     </form>
@@ -134,19 +144,23 @@
         <div class="modal-dialog modal-dialog-centered">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title" id="editDateTimeModalLabel">Edit Transaction Date/Time</h5>
+                    <h5 class="modal-title" id="editDateTimeModalLabel">Edit Transaction</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
                 <div class="modal-body">
                     <input type="hidden" id="edit-transaction-id">
                     <div class="mb-3">
-                        <label for="edit-transaction-datetime" class="form-label">New Date and Time</label>
+                        <label for="edit-transaction-note" class="form-label">Note</label>
+                        <input type="text" class="form-control" id="edit-transaction-note">
+                    </div>
+                    <div class="mb-3">
+                        <label for="edit-transaction-datetime" class="form-label">Date and Time</label>
                         <input type="datetime-local" class="form-control" id="edit-transaction-datetime">
                     </div>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="button" class="btn btn-primary" onclick="submitDateTimeChange()">Save Changes</button>
+                    <button type="button" class="btn btn-primary" onclick="submitEdit()">Save Changes</button>
                 </div>
             </div>
         </div>
@@ -222,6 +236,7 @@
         }
         
         function calculateTransactionTotals() {
+            const type = $('input[name="transaction-type"]:checked').val();
             let totalPaid = 0;
             walletState.banknotes.forEach(note => {
                 const count = parseInt($(`#paid-${note.value}`).val()) || 0;
@@ -236,8 +251,12 @@
             });
             $('#total-change').text(formatRupiah(totalChange));
 
-            const transactionCost = totalPaid - totalChange;
-            $('#transaction-cost').text(formatRupiah(transactionCost));
+            if (type === 'expense') {
+                const transactionCost = totalPaid - totalChange;
+                $('#transaction-cost').text(formatRupiah(transactionCost));
+            } else { // income
+                $('#transaction-cost').text(formatRupiah(totalChange));
+            }
         }
 
         // --- Modal Event Listeners ---
@@ -279,28 +298,34 @@
                 return formData;
             };
 
+            const type = $('input[name="transaction-type"]:checked').val();
             const paid_with = getFormData('paid');
             const change_received = getFormData('change');
+            const note = $('#txn-note').val() || (type === 'income' ? 'Income' : 'Transaction');
+            const transactionDateTime = $('#txn-datetime').val();
+            const timestamp = transactionDateTime ? transactionDateTime.replace('T', ' ') + ':00' : null;
 
-            const note = $('#txn-note').val() || 'Transaction';
-            const transactionDateTime = $('#txn-datetime').val(); // YYYY-MM-DDTHH:MM
-            const timestamp = transactionDateTime ? transactionDateTime.replace('T', ' ') + ':00' : null; // YYYY-MM-DD HH:MM:SS
-
-            const totalPaid = walletState.banknotes.reduce((sum, bn) => sum + (parseInt($(`#paid-${bn.value}`).val()) || 0) * bn.value, 0);
-            const totalChange = walletState.banknotes.reduce((sum, bn) => sum + (parseInt($(`#change-${bn.value}`).val()) || 0) * bn.value, 0);
-            const amount = totalPaid - totalChange;
+            let amount;
+            if (type === 'expense') {
+                const totalPaid = walletState.banknotes.reduce((sum, bn) => sum + (paid_with[bn.value] || 0) * bn.value, 0);
+                const totalChange = walletState.banknotes.reduce((sum, bn) => sum + (change_received[bn.value] || 0) * bn.value, 0);
+                amount = totalPaid - totalChange;
+            } else { // income
+                amount = walletState.banknotes.reduce((sum, bn) => sum + (change_received[bn.value] || 0) * bn.value, 0);
+            }
 
             if (amount <= 0) {
-                alert('Transaction amount must be positive. Please check your paid and change amounts.');
+                alert('Transaction amount must be positive.');
                 return;
             }
 
             const payload = {
                 note: note,
                 amount: amount,
+                type: type,
                 paid_with: paid_with,
                 change_received: change_received,
-                timestamp: timestamp // Add timestamp to payload
+                timestamp: timestamp
             };
 
             try {
@@ -313,7 +338,7 @@
                 if (response.ok) {
                     $('#transactionModal').modal('hide');
                     $('#transaction-form')[0].reset();
-                    calculateTransactionTotals(); // Resets all total displays
+                    handleTransactionTypeChange(); // Reset form to default state
                     fetchWalletStatus();
                     fetchHistory();
                 } else {
@@ -359,10 +384,11 @@
                 }
                 history.forEach(tx => {
                     const formattedDate = new Date(tx.timestamp).toLocaleString('id-ID', { dateStyle: 'short', timeStyle: 'short' });
-                    const amountColor = tx.amount > 0 ? 'text-danger' : 'text-success';
-                    const sign = tx.amount > 0 ? '-' : '+';
-                    // For now, all transactions are expenses, so they are red.
-                    // This can be adapted if income transactions are added.
+                    const isExpense = tx.type === 'expense';
+                    const amountColor = isExpense ? 'text-danger' : 'text-success';
+                    const sign = isExpense ? '-' : '+';
+                    const amountText = `${sign}${formatRupiah(tx.amount)}`;
+
                     historyList.append(`
                         <li class="list-group-item d-flex justify-content-between align-items-center">
                             <div>
@@ -370,8 +396,8 @@
                                 <small class="d-block text-muted">${formattedDate}</small>
                             </div>
                             <div class="d-flex align-items-center">
-                                <span class="fw-bold text-danger me-3">-${formatRupiah(tx.amount)}</span>
-                                <button class="btn btn-outline-secondary btn-sm me-2" onclick="openEditDateTimeModal(${tx.id}, '${tx.timestamp}')"><i class="bi bi-pencil-square"></i></button>
+                                <span class="fw-bold ${amountColor} me-3">${amountText}</span>
+                                <button class="btn btn-outline-secondary btn-sm me-2" onclick='openEditModal(${tx.id}, "${tx.note.replace(/"/g, '\\"')}", "${tx.timestamp}")'><i class="bi bi-pencil-square"></i></button>
                                 <button class="btn btn-outline-danger btn-sm" onclick="deleteTransaction(${tx.id})"><i class="bi bi-trash"></i></button>
                             </div>
                         </li>
@@ -398,45 +424,51 @@
             });
         }
         
-        function openEditDateTimeModal(transactionId, currentTimestamp) {
-            // Timestamps from SQLite are usually 'YYYY-MM-DD HH:MM:SS'
-            // datetime-local input needs 'YYYY-MM-DDTHH:MM'
+        function openEditModal(transactionId, currentNote, currentTimestamp) {
             const formattedTimestamp = currentTimestamp.replace(' ', 'T').substring(0, 16);
             $('#edit-transaction-id').val(transactionId);
+            $('#edit-transaction-note').val(currentNote);
             $('#edit-transaction-datetime').val(formattedTimestamp);
             $('#editDateTimeModal').modal('show');
         }
 
-        async function submitDateTimeChange() {
+        async function submitEdit() {
             const transactionId = $('#edit-transaction-id').val();
-            const newDateTimeValue = $('#edit-transaction-datetime').val(); // Format: YYYY-MM-DDTHH:MM
+            const newNote = $('#edit-transaction-note').val();
+            const newDateTimeValue = $('#edit-transaction-datetime').val();
 
-            if (!newDateTimeValue) {
-                alert('Please select a new date and time.');
+            if (!newNote && !newDateTimeValue) {
+                alert('Nothing to update.');
                 return;
             }
 
-            // Convert to 'YYYY-MM-DD HH:MM:SS' for backend/SQLite
-            const newTimestamp = newDateTimeValue.replace('T', ' ') + ':00';
+            const payload = {};
+            if (newNote) {
+                payload.note = newNote;
+            }
+            if (newDateTimeValue) {
+                payload.timestamp = newDateTimeValue.replace('T', ' ') + ':00';
+            }
 
             try {
-                const response = await fetch(`/api/transaction/${transactionId}/datetime`, {
+                const response = await fetch(`/api/transaction/${transactionId}`,
+                 {
                     method: 'PUT',
                     headers: {
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({ timestamp: newTimestamp })
+                    body: JSON.stringify(payload)
                 });
                 const result = await response.json();
                 if (response.ok) {
                     $('#editDateTimeModal').modal('hide');
-                    fetchHistory($('#filter-period').val(), $('#sort-by').val()); // Refresh history with current filters
+                    fetchHistory($('#filter-period').val(), $('#sort-by').val());
                 } else {
-                    alert('Failed to update date/time: ' + (result.error || 'Unknown error'));
+                    alert('Failed to update transaction: ' + (result.error || 'Unknown error'));
                 }
             } catch (error) {
-                console.error('Error updating date/time:', error);
-                alert('Could not update date/time.');
+                console.error('Error updating transaction:', error);
+                alert('Could not update transaction.');
             }
         }
 
@@ -466,12 +498,30 @@
         }
 
 
+        function handleTransactionTypeChange() {
+            const type = $('input[name="transaction-type"]:checked').val();
+            if (type === 'income') {
+                $('#expense-fields').hide();
+                $('#change-received-label').html('<i class="bi bi-wallet2 me-2"></i>Income Received');
+                $('#transaction-total-label').text('TOTAL INCOME');
+                // Clear expense-specific fields
+                $('#paid-with-container input').val(0).trigger('input');
+            } else { // expense
+                $('#expense-fields').show();
+                $('#change-received-label').html('<i class="bi bi-box-arrow-down me-2"></i>Change Received');
+                $('#transaction-total-label').text('TRANSACTION COST');
+            }
+            calculateTransactionTotals();
+        }
+
         // --- Event Listeners for Filters/Sorting ---
         $('#filter-period, #sort-by').on('change', function() {
             const filterPeriod = $('#filter-period').val();
             const sortBy = $('#sort-by').val();
             fetchHistory(filterPeriod, sortBy);
         });
+
+        $('input[name="transaction-type"]').on('change', handleTransactionTypeChange);
 
         // --- Initial Load ---
         $(document).ready(function() {

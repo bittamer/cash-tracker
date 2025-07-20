@@ -16,7 +16,7 @@ def get_db_connection():
     return conn
 
 def init_db():
-    """Initializes the database with the required tables and default banknotes."""
+    """Initializes the database and applies any necessary schema migrations."""
     # Ensure the data directory exists.
     os.makedirs(DATA_DIR, exist_ok=True)
     if os.path.exists(DB_FILE):
@@ -42,6 +42,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             note TEXT,
             amount INTEGER NOT NULL,
+            type TEXT NOT NULL DEFAULT 'expense', -- 'expense' or 'income'
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -93,70 +94,61 @@ def get_wallet_status():
 
 @app.route('/api/transaction', methods=['POST'])
 def create_transaction():
-    """Handles a new transaction, updating banknote counts."""
+    """Handles a new transaction (expense or income), updating banknote counts."""
     data = request.json
     note = data.get('note', 'Transaction')
     amount = data.get('amount', 0)
+    transaction_type = data.get('type', 'expense')
     paid_with = data.get('paid_with', {})
     change_received = data.get('change_received', {})
-    timestamp_str = data.get('timestamp') # Expected format: YYYY-MM-DD HH:MM:SS
+    timestamp_str = data.get('timestamp')
+
+    if transaction_type not in ['expense', 'income']:
+        return jsonify({'error': 'Invalid transaction type.'}), 400
 
     if timestamp_str:
         try:
-            # Validate the timestamp format
             datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
         except ValueError:
-            return jsonify({'error': 'Invalid timestamp format. Expected YYYY-MM-DD HH:MM:SS.'}), 400
+            return jsonify({'error': 'Invalid timestamp format.'}), 400
 
     conn = get_db_connection()
     cursor = conn.cursor()
-
     try:
-        # 1. Deduct notes paid with
-        for value_str, count in paid_with.items():
-            if count > 0:
-                cursor.execute(
-                    'UPDATE banknotes SET count = count - ? WHERE value = ? AND count >= ?',
-                    (count, int(value_str), count)
-                )
-                if cursor.rowcount == 0:
-                    raise ValueError(f"Not enough {value_str} notes in wallet.")
-
-        # 2. Add notes received as change
-        for value_str, count in change_received.items():
-            if count > 0:
-                cursor.execute(
-                    'UPDATE banknotes SET count = count + ? WHERE value = ?',
-                    (count, int(value_str))
-                )
+        details_to_log = []
+        if transaction_type == 'expense':
+            # 1. Deduct notes paid with
+            for value_str, count in paid_with.items():
+                if count > 0:
+                    cursor.execute('UPDATE banknotes SET count = count - ? WHERE value = ? AND count >= ?', (count, int(value_str), count))
+                    if cursor.rowcount == 0:
+                        raise ValueError(f"Not enough {value_str} notes in wallet.")
+                    details_to_log.append((0, int(value_str), -count)) # Temp tx_id
+            # 2. Add notes received as change
+            for value_str, count in change_received.items():
+                if count > 0:
+                    cursor.execute('UPDATE banknotes SET count = count + ? WHERE value = ?', (count, int(value_str)))
+                    details_to_log.append((0, int(value_str), count))
+        
+        elif transaction_type == 'income':
+            # For income, 'change_received' is interpreted as 'notes_received'
+            if not change_received:
+                raise ValueError("Income transaction must have notes received.")
+            for value_str, count in change_received.items():
+                if count > 0:
+                    cursor.execute('UPDATE banknotes SET count = count + ? WHERE value = ?', (count, int(value_str)))
+                    details_to_log.append((0, int(value_str), count))
 
         # 3. Log the transaction
-        if timestamp_str:
-            cursor.execute(
-                'INSERT INTO transactions (note, amount, timestamp) VALUES (?, ?, ?)',
-                (note, amount, timestamp_str)
-            )
-        else:
-            # Let SQLite use the default CURRENT_TIMESTAMP
-            cursor.execute(
-                'INSERT INTO transactions (note, amount) VALUES (?, ?)',
-                (note, amount)
-            )
+        cursor.execute(
+            'INSERT INTO transactions (note, amount, type, timestamp) VALUES (?, ?, ?, ?)',
+            (note, amount, transaction_type, timestamp_str)
+        )
         transaction_id = cursor.lastrowid
 
-        # 4. Log the banknote movements for this transaction
-        details_to_log = []
-        for value_str, count in paid_with.items():
-            if count > 0:
-                details_to_log.append((transaction_id, int(value_str), -count))
-        for value_str, count in change_received.items():
-            if count > 0:
-                details_to_log.append((transaction_id, int(value_str), count))
-        
-        cursor.executemany(
-            'INSERT INTO transaction_details (transaction_id, banknote_value, count_change) VALUES (?, ?, ?)',
-            details_to_log
-        )
+        # 4. Update and log transaction details
+        final_details = [(transaction_id, val, cnt) for _, val, cnt in details_to_log]
+        cursor.executemany('INSERT INTO transaction_details (transaction_id, banknote_value, count_change) VALUES (?, ?, ?)', final_details)
 
         conn.commit()
     except (ValueError, sqlite3.Error) as e:
@@ -199,7 +191,7 @@ def get_history():
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    query = 'SELECT id, note, amount, timestamp FROM transactions'
+    query = 'SELECT id, note, amount, type, timestamp FROM transactions'
     params = []
 
     # Filtering
@@ -263,6 +255,49 @@ def update_transaction_datetime(transaction_id):
     return jsonify({'message': 'Transaction timestamp updated successfully.'}), 200
 
 
+@app.route('/api/transaction/<int:transaction_id>', methods=['PUT'])
+def update_transaction(transaction_id):
+    """Updates the note and/or timestamp of a specific transaction."""
+    data = request.json or {}
+    new_note = data.get('note')
+    new_timestamp_str = data.get('timestamp')
+
+    # Validate input
+    if new_note is None and new_timestamp_str is None:
+        return jsonify({'error': 'Nothing to update.'}), 400
+
+    if new_timestamp_str:
+        try:
+            datetime.strptime(new_timestamp_str, '%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            return jsonify({'error': 'Invalid timestamp format. Expected YYYY-MM-DD HH:MM:SS.'}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        set_parts = []
+        params = []
+        if new_note is not None:
+            set_parts.append('note = ?')
+            params.append(new_note)
+        if new_timestamp_str is not None:
+            set_parts.append('timestamp = ?')
+            params.append(new_timestamp_str)
+        params.append(transaction_id)
+        cursor.execute(f"UPDATE transactions SET {', '.join(set_parts)} WHERE id = ?", params)
+        if cursor.rowcount == 0:
+            conn.rollback()
+            return jsonify({'error': 'Transaction not found or not updated.'}), 404
+        conn.commit()
+    except sqlite3.Error as e:
+        conn.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+    return jsonify({'message': 'Transaction updated successfully.'}), 200
+
+
 @app.route('/api/transaction/<int:transaction_id>', methods=['DELETE'])
 def delete_transaction(transaction_id):
     """Deletes a transaction and reverts the banknote counts."""
@@ -281,10 +316,16 @@ def delete_transaction(transaction_id):
         # 2. Revert the banknote counts
         for detail in details:
             # The change is reversed: if we paid (-), we add back (+). If we received (+), we subtract (-).
-            cursor.execute(
-                'UPDATE banknotes SET count = count - ? WHERE value = ?',
-                (detail['count_change'], detail['banknote_value'])
-            )
+            if detail['count_change'] > 0:
+                cursor.execute(
+                    'UPDATE banknotes SET count = count - ? WHERE value = ?',
+                    (detail['count_change'], detail['banknote_value'])
+                )
+            else:
+                cursor.execute(
+                    'UPDATE banknotes SET count = count + ? WHERE value = ?',
+                    (-detail['count_change'], detail['banknote_value'])
+                )
 
         # 3. Delete the details and the transaction itself
         cursor.execute('DELETE FROM transaction_details WHERE transaction_id = ?', (transaction_id,))
