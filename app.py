@@ -220,78 +220,126 @@ def get_history():
     conn.close()
     return jsonify(history)
 
-@app.route('/api/transaction/<int:transaction_id>/datetime', methods=['PUT'])
-def update_transaction_datetime(transaction_id):
-    """Updates the timestamp of a specific transaction."""
-    data = request.json
-    new_timestamp_str = data.get('timestamp')
 
-    if not new_timestamp_str:
-        return jsonify({'error': 'New timestamp is required.'}), 400
-
-    try:
-        # Validate and parse the timestamp (expected format: YYYY-MM-DD HH:MM:SS)
-        datetime.strptime(new_timestamp_str, '%Y-%m-%d %H:%M:%S')
-    except ValueError:
-        return jsonify({'error': 'Invalid timestamp format. Expected YYYY-MM-DD HH:MM:SS.'}), 400
-
+@app.route('/api/transaction/<int:transaction_id>', methods=['GET'])
+def get_transaction(transaction_id):
+    """Retrieves a single transaction with its details."""
     conn = get_db_connection()
     cursor = conn.cursor()
-    try:
-        cursor.execute(
-            'UPDATE transactions SET timestamp = ? WHERE id = ?',
-            (new_timestamp_str, transaction_id)
-        )
-        if cursor.rowcount == 0:
-            conn.rollback()
-            return jsonify({'error': 'Transaction not found or timestamp not updated.'}), 404
-        conn.commit()
-    except sqlite3.Error as e:
-        conn.rollback()
-        return jsonify({'error': str(e)}), 500
-    finally:
+    
+    cursor.execute('SELECT id, note, amount, type, timestamp FROM transactions WHERE id = ?', (transaction_id,))
+    transaction = cursor.fetchone()
+    
+    if not transaction:
         conn.close()
+        return jsonify({'error': 'Transaction not found.'}), 404
+        
+    transaction_data = dict(transaction)
+    
+    cursor.execute('SELECT banknote_value, count_change FROM transaction_details WHERE transaction_id = ?', (transaction_id,))
+    details = cursor.fetchall()
+    conn.close()
+    
+    # For income, all details are positive counts
+    if transaction_data['type'] == 'income':
+        transaction_data['notes_received'] = {d['banknote_value']: d['count_change'] for d in details}
+    else: # For expense
+        transaction_data['paid_with'] = {d['banknote_value']: -d['count_change'] for d in details if d['count_change'] < 0}
+        transaction_data['change_received'] = {d['banknote_value']: d['count_change'] for d in details if d['count_change'] > 0}
 
-    return jsonify({'message': 'Transaction timestamp updated successfully.'}), 200
+    return jsonify(transaction_data)
 
 
 @app.route('/api/transaction/<int:transaction_id>', methods=['PUT'])
 def update_transaction(transaction_id):
-    """Updates the note and/or timestamp of a specific transaction."""
+    """Updates a specific transaction, including note, timestamp, amount, and banknote movements."""
     data = request.json or {}
     new_note = data.get('note')
     new_timestamp_str = data.get('timestamp')
+    new_amount = data.get('amount')
+    new_paid_with = data.get('paid_with')
+    new_change_received = data.get('change_received')
 
-    # Validate input
-    if new_note is None and new_timestamp_str is None:
-        return jsonify({'error': 'Nothing to update.'}), 400
+    is_wallet_update = new_paid_with is not None or new_change_received is not None
+
+    if not any([new_note is not None, new_timestamp_str is not None, new_amount is not None, is_wallet_update]):
+        return jsonify({'error': 'At least one field must be provided for update.'}), 400
 
     if new_timestamp_str:
         try:
             datetime.strptime(new_timestamp_str, '%Y-%m-%d %H:%M:%S')
         except ValueError:
             return jsonify({'error': 'Invalid timestamp format. Expected YYYY-MM-DD HH:MM:SS.'}), 400
+    
+    if is_wallet_update and new_amount is None:
+        return jsonify({'error': 'Amount is required when updating banknote details.'}), 400
 
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        set_parts = []
-        params = []
-        if new_note is not None:
-            set_parts.append('note = ?')
-            params.append(new_note)
-        if new_timestamp_str is not None:
-            set_parts.append('timestamp = ?')
-            params.append(new_timestamp_str)
-        params.append(transaction_id)
-        cursor.execute(f"UPDATE transactions SET {', '.join(set_parts)} WHERE id = ?", params)
+        # --- Get original transaction data ---
+        cursor.execute('SELECT note, amount, type, timestamp FROM transactions WHERE id = ?', (transaction_id,))
+        transaction = cursor.fetchone()
+        if not transaction:
+            return jsonify({'error': 'Transaction not found.'}), 404
+        
+        # --- If banknote details are being updated, revert old and apply new ---
+        if is_wallet_update:
+            # 1. Get and revert old banknote movements
+            cursor.execute('SELECT banknote_value, count_change FROM transaction_details WHERE transaction_id = ?', (transaction_id,))
+            old_details = cursor.fetchall()
+            for detail in old_details:
+                cursor.execute('UPDATE banknotes SET count = count - ? WHERE value = ?', (detail['count_change'], detail['banknote_value']))
+                cursor.execute('SELECT count FROM banknotes WHERE value = ?', (detail['banknote_value'],))
+                if cursor.fetchone()['count'] < 0:
+                     raise ValueError(f"Reverting transaction would result in negative count for Rp {detail['banknote_value']}.")
+
+            # 2. Apply new banknote movements
+            details_to_log = []
+            if transaction['type'] == 'expense':
+                paid_with = new_paid_with or {}
+                change_received = new_change_received or {}
+                for value_str, count in paid_with.items():
+                    if count > 0:
+                        cursor.execute('UPDATE banknotes SET count = count - ? WHERE value = ? AND count >= ?', (count, int(value_str), count))
+                        if cursor.rowcount == 0:
+                            raise ValueError(f"Not enough {value_str} notes in wallet for new payment.")
+                        details_to_log.append((transaction_id, int(value_str), -count))
+                for value_str, count in change_received.items():
+                    if count > 0:
+                        cursor.execute('UPDATE banknotes SET count = count + ? WHERE value = ?', (count, int(value_str)))
+                        details_to_log.append((transaction_id, int(value_str), count))
+            
+            elif transaction['type'] == 'income':
+                notes_received = new_change_received or {}
+                if not notes_received:
+                     raise ValueError("Income transaction update must have notes received.")
+                for value_str, count in notes_received.items():
+                    if count > 0:
+                        cursor.execute('UPDATE banknotes SET count = count + ? WHERE value = ?', (count, int(value_str)))
+                        details_to_log.append((transaction_id, int(value_str), count))
+
+            # 3. Update transaction_details table
+            cursor.execute('DELETE FROM transaction_details WHERE transaction_id = ?', (transaction_id,))
+            if details_to_log:
+                cursor.executemany('INSERT INTO transaction_details (transaction_id, banknote_value, count_change) VALUES (?, ?, ?)', details_to_log)
+
+        # --- Update the main transaction record ---
+        final_note = new_note if new_note is not None else transaction['note']
+        final_timestamp = new_timestamp_str if new_timestamp_str is not None else transaction['timestamp']
+        final_amount = new_amount if new_amount is not None else transaction['amount']
+        
+        cursor.execute(
+            'UPDATE transactions SET note = ?, timestamp = ?, amount = ? WHERE id = ?',
+            (final_note, final_timestamp, final_amount, transaction_id)
+        )
         if cursor.rowcount == 0:
-            conn.rollback()
-            return jsonify({'error': 'Transaction not found or not updated.'}), 404
+            raise sqlite3.Error("Transaction not found or not updated during final update.")
+
         conn.commit()
-    except sqlite3.Error as e:
+    except (ValueError, sqlite3.Error) as e:
         conn.rollback()
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': str(e)}), 400
     finally:
         conn.close()
 

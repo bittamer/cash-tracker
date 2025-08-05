@@ -139,16 +139,22 @@
 
     <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-    <!-- Edit Date/Time Modal -->
-    <div class="modal fade" id="editDateTimeModal" tabindex="-1" aria-labelledby="editDateTimeModalLabel" aria-hidden="true">
+    <div class="modal fade" id="editTransactionModal" tabindex="-1" aria-labelledby="editTransactionModalLabel" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title" id="editDateTimeModalLabel">Edit Transaction</h5>
+                    <h5 class="modal-title" id="editTransactionModalLabel">Edit Transaction</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
                 <div class="modal-body">
                     <input type="hidden" id="edit-transaction-id">
+                    <input type="hidden" id="edit-transaction-type">
+
+                    <div class="mb-3">
+                        <label class="form-label">Type</label>
+                        <p><strong id="edit-transaction-type-label"></strong></p>
+                    </div>
+
                     <div class="mb-3">
                         <label for="edit-transaction-note" class="form-label">Note</label>
                         <input type="text" class="form-control" id="edit-transaction-note">
@@ -156,6 +162,21 @@
                     <div class="mb-3">
                         <label for="edit-transaction-datetime" class="form-label">Date and Time</label>
                         <input type="datetime-local" class="form-control" id="edit-transaction-datetime">
+                    </div>
+                    <hr>
+                    <div id="edit-expense-fields">
+                        <h6><i class="bi bi-box-arrow-up me-2"></i>Paid With</h6>
+                        <div id="edit-paid-with-container"></div>
+                        <p class="text-end mt-2">Total Paid: <strong id="edit-total-paid">Rp 0</strong></p>
+                    </div>
+                    <hr>
+                    <h6 id="edit-change-received-label"><i class="bi bi-box-arrow-down me-2"></i>Change Received</h6>
+                    <div id="edit-change-received-container"></div>
+                    <p class="text-end mt-2">Total: <strong id="edit-total-change">Rp 0</strong></p>
+                    <hr>
+                    <div class="text-center bg-dark p-3 rounded">
+                        <h6 class="text-muted" id="edit-transaction-total-label">TRANSACTION COST</h6>
+                        <h3 class="display-6" id="edit-transaction-cost">Rp 0</h3>
                     </div>
                 </div>
                 <div class="modal-footer">
@@ -191,18 +212,19 @@
             updateTransactionForms(data.banknotes);
         }
 
-        function createNoteInput(containerId, note) {
-            const walletCountHTML = containerId === 'paid' 
-                ? `<small class="text-muted ms-2">(Wallet: ${note.count})</small>` 
+        function createNoteInput(containerId, note, isEdit = false) {
+            const prefix = isEdit ? 'edit-' : '';
+            const walletCountHTML = containerId === 'paid'
+                ? `<small class="text-muted ms-2">(Wallet: ${note.count})</small>`
                 : '';
 
             return `
                 <div class="d-flex justify-content-between align-items-center mb-2">
                     <label class="form-label mb-0">${note.name}${walletCountHTML}</label>
                     <div>
-                        <button type="button" class="btn btn-outline-secondary btn-number" onclick="changeCount('${containerId}', ${note.value}, -1)">-</button>
-                        <input type="number" class="form-control d-inline-block text-center" style="width: 60px;" id="${containerId}-${note.value}" value="0" min="0">
-                        <button type="button" class="btn btn-outline-secondary btn-number" onclick="changeCount('${containerId}', ${note.value}, 1)">+</button>
+                        <button type="button" class="btn btn-outline-secondary btn-number" onclick="changeCount('${prefix}${containerId}', ${note.value}, -1, ${isEdit})">-</button>
+                        <input type="number" class="form-control d-inline-block text-center" style="width: 60px;" id="${prefix}${containerId}-${note.value}" data-value="${note.value}" value="0" min="0">
+                        <button type="button" class="btn btn-outline-secondary btn-number" onclick="changeCount('${prefix}${containerId}', ${note.value}, 1, ${isEdit})">+</button>
                     </div>
                 </div>`;
         }
@@ -220,14 +242,15 @@
             $('#paid-with-container input, #change-received-container input').on('input', calculateTransactionTotals);
         }
 
-        function changeCount(containerId, noteValue, delta) {
+        function changeCount(containerId, noteValue, delta, isEdit = false) {
             const input = $(`#${containerId}-${noteValue}`);
             let currentValue = parseInt(input.val()) || 0;
             let newValue = Math.max(0, currentValue + delta);
 
-            if (containerId === 'paid') {
+            if (containerId.endsWith('paid')) {
                 const noteInWallet = walletState.banknotes.find(n => n.value === noteValue);
-                if (noteInWallet && newValue > noteInWallet.count) {
+                // For edits, the original amount is "available" too. We'd need a more complex check, so we omit it for simplicity.
+                if (!isEdit && noteInWallet && newValue > noteInWallet.count) {
                     newValue = noteInWallet.count; // Cap at available amount
                 }
             }
@@ -258,6 +281,29 @@
                 $('#transaction-cost').text(formatRupiah(totalChange));
             }
         }
+
+        function calculateEditTransactionTotals() {
+            const type = $('#edit-transaction-type').val();
+            let totalPaid = 0;
+            $('#edit-paid-with-container input').each(function() {
+                totalPaid += (parseInt($(this).val()) || 0) * (parseInt($(this).data('value')) || 0);
+            });
+            $('#edit-total-paid').text(formatRupiah(totalPaid));
+
+            let totalChange = 0;
+            $('#edit-change-received-container input').each(function() {
+                totalChange += (parseInt($(this).val()) || 0) * (parseInt($(this).data('value')) || 0);
+            });
+            $('#edit-total-change').text(formatRupiah(totalChange));
+
+            if (type === 'expense') {
+                const transactionCost = totalPaid - totalChange;
+                $('#edit-transaction-cost').text(formatRupiah(transactionCost));
+            } else { // income
+                $('#edit-transaction-cost').text(formatRupiah(totalChange));
+            }
+        }
+
 
         // --- Modal Event Listeners ---
         $('#transactionModal').on('show.bs.modal', function () {
@@ -397,7 +443,7 @@
                             </div>
                             <div class="d-flex align-items-center">
                                 <span class="fw-bold ${amountColor} me-3">${amountText}</span>
-                                <button class="btn btn-outline-secondary btn-sm me-2" onclick='openEditModal(${tx.id}, "${tx.note.replace(/"/g, '\\"')}", "${tx.timestamp}")'><i class="bi bi-pencil-square"></i></button>
+                                <button class="btn btn-outline-secondary btn-sm me-2" onclick='openEditModal(${tx.id})'><i class="bi bi-pencil-square"></i></button>
                                 <button class="btn btn-outline-danger btn-sm" onclick="deleteTransaction(${tx.id})"><i class="bi bi-trash"></i></button>
                             </div>
                         </li>
@@ -424,44 +470,95 @@
             });
         }
         
-        function openEditModal(transactionId, currentNote, currentTimestamp) {
-            const formattedTimestamp = currentTimestamp.replace(' ', 'T').substring(0, 16);
-            $('#edit-transaction-id').val(transactionId);
-            $('#edit-transaction-note').val(currentNote);
-            $('#edit-transaction-datetime').val(formattedTimestamp);
-            $('#editDateTimeModal').modal('show');
+        async function openEditModal(transactionId) {
+            const response = await fetch(`/api/transaction/${transactionId}`);
+            if (!response.ok) {
+                alert('Failed to fetch transaction details.');
+                return;
+            }
+            const tx = await response.json();
+
+            $('#edit-transaction-id').val(tx.id);
+            $('#edit-transaction-type').val(tx.type);
+            $('#edit-transaction-note').val(tx.note);
+            $('#edit-transaction-datetime').val(tx.timestamp.replace(' ', 'T').substring(0, 16));
+            $('#edit-transaction-type-label').text(tx.type.charAt(0).toUpperCase() + tx.type.slice(1));
+
+            const paidContainer = $('#edit-paid-with-container');
+            const changeContainer = $('#edit-change-received-container');
+            paidContainer.empty();
+            changeContainer.empty();
+
+            walletState.banknotes.forEach(note => {
+                if (tx.type === 'expense') {
+                    paidContainer.append(createNoteInput('paid', note, true));
+                    changeContainer.append(createNoteInput('change', note, true));
+                    const paidCount = tx.paid_with[note.value] || 0;
+                    $(`#edit-paid-${note.value}`).val(paidCount);
+                    const changeCount = tx.change_received[note.value] || 0;
+                    $(`#edit-change-${note.value}`).val(changeCount);
+                } else { // income
+                    changeContainer.append(createNoteInput('change', note, true));
+                    const receivedCount = tx.notes_received[note.value] || 0;
+                    $(`#edit-change-${note.value}`).val(receivedCount);
+                }
+            });
+            
+            handleEditTransactionTypeChange(tx.type);
+            calculateEditTransactionTotals();
+            
+            $('#edit-paid-with-container input, #edit-change-received-container input').on('input', calculateEditTransactionTotals);
+
+            $('#editTransactionModal').modal('show');
         }
 
         async function submitEdit() {
             const transactionId = $('#edit-transaction-id').val();
-            const newNote = $('#edit-transaction-note').val();
-            const newDateTimeValue = $('#edit-transaction-datetime').val();
+            const note = $('#edit-transaction-note').val();
+            const timestamp = $('#edit-transaction-datetime').val().replace('T', ' ') + ':00';
+            const type = $('#edit-transaction-type').val();
 
-            if (!newNote && !newDateTimeValue) {
-                alert('Nothing to update.');
+            const getFormData = (containerId) => {
+                const data = {};
+                $(containerId).find('input').each(function() {
+                    const count = parseInt($(this).val()) || 0;
+                    if (count > 0) {
+                        data[$(this).data('value')] = count;
+                    }
+                });
+                return data;
+            };
+
+            const paid_with = getFormData('#edit-paid-with-container');
+            const change_received = getFormData('#edit-change-received-container');
+
+            const totalPaid = Object.entries(paid_with).reduce((sum, [val, count]) => sum + (parseInt(val) * count), 0);
+            const totalChange = Object.entries(change_received).reduce((sum, [val, count]) => sum + (parseInt(val) * count), 0);
+            const amount = type === 'expense' ? (totalPaid - totalChange) : totalChange;
+
+            if (amount <= 0) {
+                alert('Transaction amount must be positive.');
                 return;
             }
 
-            const payload = {};
-            if (newNote) {
-                payload.note = newNote;
-            }
-            if (newDateTimeValue) {
-                payload.timestamp = newDateTimeValue.replace('T', ' ') + ':00';
-            }
+            const payload = {
+                note,
+                timestamp,
+                amount,
+                paid_with: type === 'expense' ? paid_with : {},
+                change_received: change_received
+            };
 
             try {
-                const response = await fetch(`/api/transaction/${transactionId}`,
-                 {
+                const response = await fetch(`/api/transaction/${transactionId}`, {
                     method: 'PUT',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 });
                 const result = await response.json();
                 if (response.ok) {
-                    $('#editDateTimeModal').modal('hide');
+                    $('#editTransactionModal').modal('hide');
+                    fetchWalletStatus();
                     fetchHistory($('#filter-period').val(), $('#sort-by').val());
                 } else {
                     alert('Failed to update transaction: ' + (result.error || 'Unknown error'));
@@ -512,6 +609,18 @@
                 $('#transaction-total-label').text('TRANSACTION COST');
             }
             calculateTransactionTotals();
+        }
+
+        function handleEditTransactionTypeChange(type) {
+            if (type === 'income') {
+                $('#edit-expense-fields').hide();
+                $('#edit-change-received-label').html('<i class="bi bi-wallet2 me-2"></i>Income Received');
+                $('#edit-transaction-total-label').text('TOTAL INCOME');
+            } else { // expense
+                $('#edit-expense-fields').show();
+                $('#edit-change-received-label').html('<i class="bi bi-box-arrow-down me-2"></i>Change Received');
+                $('#edit-transaction-total-label').text('TRANSACTION COST');
+            }
         }
 
         // --- Event Listeners for Filters/Sorting ---
