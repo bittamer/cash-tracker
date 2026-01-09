@@ -13,61 +13,85 @@ def get_db_connection():
     """Establishes a connection to the SQLite database."""
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
+    conn.execute('PRAGMA foreign_keys = ON')  # Enable foreign key constraints
     return conn
 
 def init_db():
     """Initializes the database and applies any necessary schema migrations."""
     # Ensure the data directory exists.
     os.makedirs(DATA_DIR, exist_ok=True)
-    if os.path.exists(DB_FILE):
-        return # Avoid re-initializing
 
-    print("Initializing database...")
+    # Check if database exists for migration purposes
+    db_exists = os.path.exists(DB_FILE)
+
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    # Banknotes table
-    cursor.execute('''
-        CREATE TABLE banknotes (
-            id INTEGER PRIMARY KEY,
-            value INTEGER UNIQUE NOT NULL,
-            name TEXT NOT NULL,
-            count INTEGER NOT NULL DEFAULT 0
-        )
-    ''')
+    if not db_exists:
+        print("Initializing database...")
 
-    # Transactions table
-    cursor.execute('''
-        CREATE TABLE transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            note TEXT,
-            amount INTEGER NOT NULL,
-            type TEXT NOT NULL DEFAULT 'expense', -- 'expense' or 'income'
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
+        # Banknotes table
+        cursor.execute('''
+            CREATE TABLE banknotes (
+                id INTEGER PRIMARY KEY,
+                value INTEGER UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                count INTEGER NOT NULL DEFAULT 0
+            )
+        ''')
 
-    # Transaction details table to log banknote movements
-    cursor.execute('''
-        CREATE TABLE transaction_details (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            transaction_id INTEGER NOT NULL,
-            banknote_value INTEGER NOT NULL,
-            count_change INTEGER NOT NULL, -- positive for received, negative for paid
-            FOREIGN KEY (transaction_id) REFERENCES transactions (id)
-        )
-    ''')
-    
-    # Pre-populate with Indonesian Rupiah denominations
-    banknotes = [
-        (100000, 'Rp 100,000'), (50000, 'Rp 50,000'), (20000, 'Rp 20,000'),
-        (10000, 'Rp 10,000'), (5000, 'Rp 5,000'), (2000, 'Rp 2,000'), (1000, 'Rp 1,000')
-    ]
-    cursor.executemany('INSERT INTO banknotes (value, name) VALUES (?, ?)', banknotes)
-    
-    conn.commit()
+        # Transactions table
+        cursor.execute('''
+            CREATE TABLE transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                note TEXT,
+                amount INTEGER NOT NULL,
+                type TEXT NOT NULL DEFAULT 'expense', -- 'expense' or 'income'
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # Transaction details table to log banknote movements
+        cursor.execute('''
+            CREATE TABLE transaction_details (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                transaction_id INTEGER NOT NULL,
+                banknote_value INTEGER NOT NULL,
+                count_change INTEGER NOT NULL, -- positive for received, negative for paid
+                FOREIGN KEY (transaction_id) REFERENCES transactions (id) ON DELETE CASCADE
+            )
+        ''')
+
+        # Create indexes for performance
+        cursor.execute('CREATE INDEX idx_transactions_timestamp ON transactions(timestamp)')
+        cursor.execute('CREATE INDEX idx_transactions_type ON transactions(type)')
+        cursor.execute('CREATE INDEX idx_transaction_details_transaction_id ON transaction_details(transaction_id)')
+
+        # Pre-populate with Indonesian Rupiah denominations
+        banknotes = [
+            (100000, 'Rp 100,000'), (50000, 'Rp 50,000'), (20000, 'Rp 20,000'),
+            (10000, 'Rp 10,000'), (5000, 'Rp 5,000'), (2000, 'Rp 2,000'), (1000, 'Rp 1,000')
+        ]
+        cursor.executemany('INSERT INTO banknotes (value, name) VALUES (?, ?)', banknotes)
+
+        conn.commit()
+        print("Database initialized.")
+    else:
+        # Handle migrations for existing databases
+        try:
+            # Check if indexes exist, create if missing
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_transactions_timestamp'")
+            if not cursor.fetchone():
+                print("Adding missing indexes...")
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_transactions_timestamp ON transactions(timestamp)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_transactions_type ON transactions(type)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_transaction_details_transaction_id ON transaction_details(transaction_id)')
+                conn.commit()
+                print("Indexes added.")
+        except sqlite3.Error as e:
+            print(f"Migration warning: {e}")
+
     conn.close()
-    print("Database initialized.")
 
 # --- API Endpoints ---
 
@@ -96,6 +120,9 @@ def get_wallet_status():
 def create_transaction():
     """Handles a new transaction (expense or income), updating banknote counts."""
     data = request.json
+    if not data:
+        return jsonify({'error': 'Request body must contain JSON data.'}), 400
+
     note = data.get('note', 'Transaction')
     amount = data.get('amount', 0)
     transaction_type = data.get('type', 'expense')
@@ -103,38 +130,63 @@ def create_transaction():
     change_received = data.get('change_received', {})
     timestamp_str = data.get('timestamp')
 
+    # Validate transaction type
     if transaction_type not in ['expense', 'income']:
-        return jsonify({'error': 'Invalid transaction type.'}), 400
+        return jsonify({'error': 'Invalid transaction type. Must be "expense" or "income".'}), 400
 
+    # Validate amount
+    if not isinstance(amount, (int, float)) or amount <= 0:
+        return jsonify({'error': 'Amount must be a positive number.'}), 400
+
+    # Validate paid_with and change_received are dictionaries
+    if not isinstance(paid_with, dict):
+        return jsonify({'error': 'paid_with must be a dictionary.'}), 400
+    if not isinstance(change_received, dict):
+        return jsonify({'error': 'change_received must be a dictionary.'}), 400
+
+    # Validate timestamp format
     if timestamp_str:
         try:
             datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
         except ValueError:
-            return jsonify({'error': 'Invalid timestamp format.'}), 400
+            return jsonify({'error': 'Invalid timestamp format. Expected YYYY-MM-DD HH:MM:SS.'}), 400
 
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
         details_to_log = []
         if transaction_type == 'expense':
+            # Validate that expense has payment method
+            if not paid_with:
+                raise ValueError("Expense transaction must specify banknotes paid with.")
+
             # 1. Deduct notes paid with
             for value_str, count in paid_with.items():
+                if not isinstance(count, int) or count < 0:
+                    raise ValueError(f"Invalid count for banknote {value_str}.")
                 if count > 0:
                     cursor.execute('UPDATE banknotes SET count = count - ? WHERE value = ? AND count >= ?', (count, int(value_str), count))
                     if cursor.rowcount == 0:
-                        raise ValueError(f"Not enough {value_str} notes in wallet.")
+                        cursor.execute('SELECT count FROM banknotes WHERE value = ?', (int(value_str),))
+                        row = cursor.fetchone()
+                        current_count = row['count'] if row else 0
+                        raise ValueError(f"Insufficient Rp {value_str} notes in wallet. Available: {current_count}, Required: {count}.")
                     details_to_log.append((0, int(value_str), -count)) # Temp tx_id
             # 2. Add notes received as change
             for value_str, count in change_received.items():
+                if not isinstance(count, int) or count < 0:
+                    raise ValueError(f"Invalid count for change received {value_str}.")
                 if count > 0:
                     cursor.execute('UPDATE banknotes SET count = count + ? WHERE value = ?', (count, int(value_str)))
                     details_to_log.append((0, int(value_str), count))
-        
+
         elif transaction_type == 'income':
             # For income, 'change_received' is interpreted as 'notes_received'
             if not change_received:
-                raise ValueError("Income transaction must have notes received.")
+                raise ValueError("Income transaction must specify banknotes received.")
             for value_str, count in change_received.items():
+                if not isinstance(count, int) or count < 0:
+                    raise ValueError(f"Invalid count for income {value_str}.")
                 if count > 0:
                     cursor.execute('UPDATE banknotes SET count = count + ? WHERE value = ?', (count, int(value_str)))
                     details_to_log.append((0, int(value_str), count))
@@ -163,18 +215,31 @@ def create_transaction():
 def adjust_wallet():
     """Directly updates the counts of each banknote in the wallet."""
     data = request.json
+    if not data:
+        return jsonify({'error': 'Request body must contain JSON data.'}), 400
+
     adjustments = data.get('adjustments', {})
+    if not isinstance(adjustments, dict):
+        return jsonify({'error': 'Adjustments must be a dictionary.'}), 400
 
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
         for value_str, count in adjustments.items():
+            # Validate count is non-negative
+            count_int = int(count)
+            if count_int < 0:
+                raise ValueError(f"Count for Rp {value_str} cannot be negative.")
+
             cursor.execute(
                 'UPDATE banknotes SET count = ? WHERE value = ?',
-                (int(count), int(value_str))
+                (count_int, int(value_str))
             )
+            if cursor.rowcount == 0:
+                raise ValueError(f"Banknote value Rp {value_str} not found.")
+
         conn.commit()
-    except sqlite3.Error as e:
+    except (ValueError, sqlite3.Error) as e:
         conn.rollback()
         return jsonify({'error': str(e)}), 400
     finally:
@@ -361,14 +426,16 @@ def delete_transaction(transaction_id):
         if not details:
             return jsonify({'error': 'Transaction not found or has no details to revert.'}), 404
 
-        # 2. Revert the banknote counts
+        # 2. Revert the banknote counts and check for negative values
         for detail in details:
             # The change is reversed: if we paid (-), we add back (+). If we received (+), we subtract (-).
             if detail['count_change'] > 0:
                 cursor.execute(
-                    'UPDATE banknotes SET count = count - ? WHERE value = ?',
-                    (detail['count_change'], detail['banknote_value'])
+                    'UPDATE banknotes SET count = count - ? WHERE value = ? AND count >= ?',
+                    (detail['count_change'], detail['banknote_value'], detail['count_change'])
                 )
+                if cursor.rowcount == 0:
+                    raise ValueError(f"Cannot delete transaction: reverting would result in negative count for Rp {detail['banknote_value']}.")
             else:
                 cursor.execute(
                     'UPDATE banknotes SET count = count + ? WHERE value = ?',
@@ -380,9 +447,9 @@ def delete_transaction(transaction_id):
         cursor.execute('DELETE FROM transactions WHERE id = ?', (transaction_id,))
 
         conn.commit()
-    except sqlite3.Error as e:
+    except (ValueError, sqlite3.Error) as e:
         conn.rollback()
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': str(e)}), 400
     finally:
         conn.close()
 
