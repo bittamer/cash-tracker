@@ -10,9 +10,9 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;700&display=swap" rel="stylesheet">
     <style>
-        body { 
-            background-color: #121212; 
-            color: #e0e0e0; 
+        body {
+            background-color: #121212;
+            color: #e0e0e0;
             font-family: 'Inter', sans-serif;
         }
         .card { background-color: #1e1e1e; border: 1px solid #333; }
@@ -23,9 +23,55 @@
         .btn-number { width: 45px; height: 45px; }
         .note-value { font-weight: 500; font-size: 1.1rem; }
         .history-card { background-color: #1e1e1e; border-radius: 0.5rem; }
+
+        /* Loading spinner */
+        .spinner-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 9999;
+        }
+        .spinner-overlay.show {
+            display: flex;
+        }
+
+        /* Toast notifications */
+        .toast-container {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 10000;
+        }
+        .toast {
+            background-color: #1e1e1e;
+            border: 1px solid #333;
+            color: #e0e0e0;
+        }
+        .toast.error {
+            border-left: 4px solid #cf6679;
+        }
+        .toast.success {
+            border-left: 4px solid #03dac6;
+        }
     </style>
 </head>
 <body>
+    <!-- Loading Spinner -->
+    <div class="spinner-overlay" id="loadingSpinner">
+        <div class="spinner-border text-primary" style="width: 3rem; height: 3rem;" role="status">
+            <span class="visually-hidden">Loading...</span>
+        </div>
+    </div>
+
+    <!-- Toast Container for Notifications -->
+    <div class="toast-container"></div>
+
     <div class="container mt-4">
         <div class="text-center mb-4">
             <h1 class="display-4">My Cash Wallet</h1>
@@ -194,6 +240,37 @@
         // --- Utility Functions ---
         const formatRupiah = (number) => new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', minimumFractionDigits: 0 }).format(number);
 
+        // Loading spinner control
+        function showLoading() {
+            $('#loadingSpinner').addClass('show');
+        }
+
+        function hideLoading() {
+            $('#loadingSpinner').removeClass('show');
+        }
+
+        // Toast notifications
+        function showToast(message, type = 'info') {
+            const toastId = 'toast-' + Date.now();
+            const iconClass = type === 'error' ? 'bi-exclamation-circle-fill' : 'bi-check-circle-fill';
+            const toast = $(`
+                <div id="${toastId}" class="toast ${type}" role="alert" aria-live="assertive" aria-atomic="true">
+                    <div class="toast-header">
+                        <i class="bi ${iconClass} me-2"></i>
+                        <strong class="me-auto">${type === 'error' ? 'Error' : 'Success'}</strong>
+                        <button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close"></button>
+                    </div>
+                    <div class="toast-body">${message}</div>
+                </div>
+            `);
+            $('.toast-container').append(toast);
+            const bsToast = new bootstrap.Toast(toast[0], { autohide: true, delay: 5000 });
+            bsToast.show();
+            toast.on('hidden.bs.toast', function() {
+                $(this).remove();
+            });
+        }
+
         // --- Core UI Functions ---
         function updateUI(data) {
             walletState = data;
@@ -309,28 +386,47 @@
         $('#transactionModal').on('show.bs.modal', function () {
             // Set current date and time for new transaction
             const now = new Date();
-            now.setMinutes(now.getMinutes() - now.getTimezoneOffset()); // Adjust for local timezone
-            const formattedNow = now.toISOString().slice(0,16);
+            const year = now.getFullYear();
+            const month = String(now.getMonth() + 1).padStart(2, '0');
+            const day = String(now.getDate()).padStart(2, '0');
+            const hours = String(now.getHours()).padStart(2, '0');
+            const minutes = String(now.getMinutes()).padStart(2, '0');
+            const formattedNow = `${year}-${month}-${day}T${hours}:${minutes}`;
             $('#txn-datetime').val(formattedNow);
-            // Reset other form fields if necessary
+            // Reset other form fields
             $('#txn-note').val('');
-            // Consider resetting paid-with and change-received inputs if they persist
-            $('#paid-with-container input, #change-received-container input').val(0).trigger('input'); 
+            $('#paid-with-container input, #change-received-container input').val(0).trigger('input');
+        });
+
+        $('#transactionModal').on('hidden.bs.modal', function () {
+            // Reset form when modal is closed
+            $('#transaction-form')[0].reset();
+            $('#paid-with-container input, #change-received-container input').val(0);
+            handleTransactionTypeChange();
+        });
+
+        $('#editTransactionModal').on('hidden.bs.modal', function () {
+            // Clean up edit form when modal is closed
+            $('#edit-paid-with-container').empty();
+            $('#edit-change-received-container').empty();
         });
 
         // --- API Calls ---
         async function fetchWalletStatus() {
             try {
+                showLoading();
                 const response = await fetch('/api/wallet');
                 const data = await response.json();
                 if (response.ok) {
                     updateUI(data);
                 } else {
-                    alert('Error fetching wallet status: ' + data.error);
+                    showToast('Error fetching wallet status: ' + data.error, 'error');
                 }
             } catch (error) {
                 console.error('Fetch error:', error);
-                alert('Could not connect to the server.');
+                showToast('Could not connect to the server.', 'error');
+            } finally {
+                hideLoading();
             }
         }
 
@@ -375,6 +471,7 @@
             };
 
             try {
+                showLoading();
                 const response = await fetch('/api/transaction', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -385,14 +482,17 @@
                     $('#transactionModal').modal('hide');
                     $('#transaction-form')[0].reset();
                     handleTransactionTypeChange(); // Reset form to default state
-                    fetchWalletStatus();
-                    fetchHistory();
+                    showToast('Transaction created successfully!', 'success');
+                    await fetchWalletStatus();
+                    await fetchHistory();
                 } else {
-                    alert('Transaction failed: ' + result.error);
+                    showToast('Transaction failed: ' + result.error, 'error');
                 }
             } catch (error) {
                 console.error('Submit error:', error);
-                alert('Could not submit transaction.');
+                showToast('Could not submit transaction. Please try again.', 'error');
+            } finally {
+                hideLoading();
             }
         }
         
@@ -402,19 +502,23 @@
             }
 
             try {
+                showLoading();
                 const response = await fetch(`/api/transaction/${transactionId}`, {
                     method: 'DELETE'
                 });
                 const result = await response.json();
                 if (response.ok) {
-                    fetchWalletStatus();
-                    fetchHistory();
+                    showToast('Transaction deleted successfully!', 'success');
+                    await fetchWalletStatus();
+                    await fetchHistory($('#filter-period').val(), $('#sort-by').val());
                 } else {
-                    alert('Deletion failed: ' + result.error);
+                    showToast('Deletion failed: ' + result.error, 'error');
                 }
             } catch (error) {
                 console.error('Delete error:', error);
-                alert('Could not delete transaction.');
+                showToast('Could not delete transaction. Please try again.', 'error');
+            } finally {
+                hideLoading();
             }
         }
 
@@ -471,45 +575,53 @@
         }
         
         async function openEditModal(transactionId) {
-            const response = await fetch(`/api/transaction/${transactionId}`);
-            if (!response.ok) {
-                alert('Failed to fetch transaction details.');
-                return;
-            }
-            const tx = await response.json();
-
-            $('#edit-transaction-id').val(tx.id);
-            $('#edit-transaction-type').val(tx.type);
-            $('#edit-transaction-note').val(tx.note);
-            $('#edit-transaction-datetime').val(tx.timestamp.replace(' ', 'T').substring(0, 16));
-            $('#edit-transaction-type-label').text(tx.type.charAt(0).toUpperCase() + tx.type.slice(1));
-
-            const paidContainer = $('#edit-paid-with-container');
-            const changeContainer = $('#edit-change-received-container');
-            paidContainer.empty();
-            changeContainer.empty();
-
-            walletState.banknotes.forEach(note => {
-                if (tx.type === 'expense') {
-                    paidContainer.append(createNoteInput('paid', note, true));
-                    changeContainer.append(createNoteInput('change', note, true));
-                    const paidCount = tx.paid_with[note.value] || 0;
-                    $(`#edit-paid-${note.value}`).val(paidCount);
-                    const changeCount = tx.change_received[note.value] || 0;
-                    $(`#edit-change-${note.value}`).val(changeCount);
-                } else { // income
-                    changeContainer.append(createNoteInput('change', note, true));
-                    const receivedCount = tx.notes_received[note.value] || 0;
-                    $(`#edit-change-${note.value}`).val(receivedCount);
+            try {
+                showLoading();
+                const response = await fetch(`/api/transaction/${transactionId}`);
+                if (!response.ok) {
+                    showToast('Failed to fetch transaction details.', 'error');
+                    return;
                 }
-            });
-            
-            handleEditTransactionTypeChange(tx.type);
-            calculateEditTransactionTotals();
-            
-            $('#edit-paid-with-container input, #edit-change-received-container input').on('input', calculateEditTransactionTotals);
+                const tx = await response.json();
 
-            $('#editTransactionModal').modal('show');
+                $('#edit-transaction-id').val(tx.id);
+                $('#edit-transaction-type').val(tx.type);
+                $('#edit-transaction-note').val(tx.note);
+                $('#edit-transaction-datetime').val(tx.timestamp.replace(' ', 'T').substring(0, 16));
+                $('#edit-transaction-type-label').text(tx.type.charAt(0).toUpperCase() + tx.type.slice(1));
+
+                const paidContainer = $('#edit-paid-with-container');
+                const changeContainer = $('#edit-change-received-container');
+                paidContainer.empty();
+                changeContainer.empty();
+
+                walletState.banknotes.forEach(note => {
+                    if (tx.type === 'expense') {
+                        paidContainer.append(createNoteInput('paid', note, true));
+                        changeContainer.append(createNoteInput('change', note, true));
+                        const paidCount = tx.paid_with[note.value] || 0;
+                        $(`#edit-paid-${note.value}`).val(paidCount);
+                        const changeCount = tx.change_received[note.value] || 0;
+                        $(`#edit-change-${note.value}`).val(changeCount);
+                    } else { // income
+                        changeContainer.append(createNoteInput('change', note, true));
+                        const receivedCount = tx.notes_received[note.value] || 0;
+                        $(`#edit-change-${note.value}`).val(receivedCount);
+                    }
+                });
+
+                handleEditTransactionTypeChange(tx.type);
+                calculateEditTransactionTotals();
+
+                $('#edit-paid-with-container input, #edit-change-received-container input').on('input', calculateEditTransactionTotals);
+
+                $('#editTransactionModal').modal('show');
+            } catch (error) {
+                console.error('Error loading transaction for edit:', error);
+                showToast('Could not load transaction details. Please try again.', 'error');
+            } finally {
+                hideLoading();
+            }
         }
 
         async function submitEdit() {
@@ -550,6 +662,7 @@
             };
 
             try {
+                showLoading();
                 const response = await fetch(`/api/transaction/${transactionId}`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
@@ -558,14 +671,17 @@
                 const result = await response.json();
                 if (response.ok) {
                     $('#editTransactionModal').modal('hide');
-                    fetchWalletStatus();
-                    fetchHistory($('#filter-period').val(), $('#sort-by').val());
+                    showToast('Transaction updated successfully!', 'success');
+                    await fetchWalletStatus();
+                    await fetchHistory($('#filter-period').val(), $('#sort-by').val());
                 } else {
-                    alert('Failed to update transaction: ' + (result.error || 'Unknown error'));
+                    showToast('Failed to update transaction: ' + (result.error || 'Unknown error'), 'error');
                 }
             } catch (error) {
                 console.error('Error updating transaction:', error);
-                alert('Could not update transaction.');
+                showToast('Could not update transaction. Please try again.', 'error');
+            } finally {
+                hideLoading();
             }
         }
 
@@ -574,8 +690,9 @@
             walletState.banknotes.forEach(note => {
                 adjustments[note.value] = parseInt($(`#adjust-${note.value}`).val()) || 0;
             });
-            
+
             try {
+                showLoading();
                 const response = await fetch('/api/wallet/adjust', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -584,13 +701,16 @@
                 const result = await response.json();
                 if (response.ok) {
                     $('#adjustModal').modal('hide');
-                    fetchWalletStatus();
+                    showToast('Wallet adjusted successfully!', 'success');
+                    await fetchWalletStatus();
                 } else {
-                    alert('Adjustment failed: ' + result.error);
+                    showToast('Adjustment failed: ' + result.error, 'error');
                 }
             } catch (error) {
                 console.error('Adjustment error:', error);
-                alert('Could not save adjustments.');
+                showToast('Could not save adjustments. Please try again.', 'error');
+            } finally {
+                hideLoading();
             }
         }
 
